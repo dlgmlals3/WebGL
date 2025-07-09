@@ -63,8 +63,8 @@ const init = () => {
 const onDocumentMouseMove = (event) => {
     mouseX = event.clientX - windowHalfX;
     mouseY = event.clientY - windowHalfY;
-    // console.log(mouseY);
-    // console.log(event.clientX, windowHalfX, mouseX);
+    console.log(mouseY);
+    console.log(event.clientX, windowHalfX, mouseX);
 };
 
 const animete = () => {
