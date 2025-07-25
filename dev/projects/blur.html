@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Two-Pass 가우시안 블러 이미지 처리</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #222;
+            font-family: Arial, sans-serif;
+        }
+        
+        canvas {
+            display: block;
+        }
+        
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-size: 14px;
+            z-index: 100;
+        }
+
+        #infoRight {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: white;
+            font-size: 14px;
+            z-index: 100;
+        }
+        
+        #controls {
+            position: absolute;
+            top: 50px;
+            right: 10px;
+            background: rgba(0,0,0,0.8);
+            padding: 20px;
+            color: white;
+            border-radius: 8px;
+            min-width: 200px;
+        }
+        
+        .control-group {
+            margin-bottom: 15px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        
+        input[type="range"] {
+            width: 100%;
+            margin-bottom: 5px;
+        }
+        
+        .value-display {
+            font-size: 12px;
+            color: #ccc;
+        }
+        
+        #fileInput {
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <h3>Radius Adaptive Blur</h3>        
+    </div>
+
+    <div id="infoRight">
+        <h3>Alpha Masking</h3>        
+    </div>
+
+    <div id="controls">
+        <div class="control-group">
+            <label>이미지 업로드:</label>
+            <input type="file" id="fileInput" accept="image/*,.png,.jpg,.jpeg,.gif,.bmp,.webp">
+            <div id="uploadStatus" style="font-size: 12px; color: #ccc; margin-top: 5px;">파일을 선택하세요</div>
+        </div>
+        
+        <div class="control-group">
+            <label>X Offset (좌우 경계)</label>
+            <input type="range" id="xOffset" min="-1.0" max="1.0" step="0.01" value="0.0">
+            <span class="value-display" id="xOffsetValue">0.0</span>
+        </div>
+
+        <div class="control-group">
+            <label>Y Offset (블러 영역 높이)</label>
+            <input type="range" id="yOffset" min="0" max="1.0" step="0.01" value="0.5">
+            <span class="value-display" id="yOffsetValue">0.5</span>
+        </div>
+        
+        <div class="control-group">
+            <label>blurStrength </label>
+            <input type="range" id="blurStrength" min="1" max="3" step="0.01" value="1">
+            <span class="value-display" id="blurStrengthValue">1</span>
+        </div>
+        
+        <div class="control-group">
+            <label>Radius </label>
+            <input type="range" id="blurRadius" min="1" max="200" step="1" value="100">
+            <span class="value-display" id="blurRadiusValue">100</span>
+        </div>
+
+        <div class="control-group">
+            <label>베지어 P1 (시작점 기울기)</label>
+            <input type="range" id="bezierP1" min="0.0" max="1.0" step="0.01" value="1.0">
+            <span class="value-display" id="bezierP1Value">1.0</span>
+        </div>
+        
+        <div class="control-group">
+            <label>베지어 P2 (끝점 기울기)</label>
+            <input type="range" id="bezierP2" min="0.0" max="1.0" step="0.01" value="1.0">
+            <span class="value-display" id="bezierP2Value">1.0</span>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    
+    <script>
+        let scene, camera, renderer, plane;
+        let imageTexture = null;
+        let horizontalTarget, verticalTarget;
+        let blurMaterial;
+
+        function init() {
+            console.log("Two-Pass 가우시안 블러 앱 초기화 중...");
+
+            // 기본 Three.js 설정
+            scene = new THREE.Scene();
+            camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            // 렌더 타겟 생성
+            createRenderTargets();
+
+            // 기본 이미지 생성
+            createDefaultTexture()
+            
+            // 전체 화면 평면 생성
+            createImagePlane();
+
+            // 컨트롤 설정
+            setupControls();
+
+            // 파일 입력 설정
+            setupFileInput();
+
+            // 윈도우 리사이즈
+            window.addEventListener('resize', onWindowResize);
+
+            console.log("초기화 완료!");
+        }
+
+        function createDefaultTexture() {
+            // 상대 경로로 이미지 파일 로드 시도
+            loadImageFromFile('./2.jpg');
+        }
+
+        function loadImageFromFile(filename) {
+            console.log('이미지 로딩 시도:', filename);
+            
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            
+            img.onload = () => {
+                console.log('이미지 로드 성공:', img.width, 'x', img.height);
+                
+                try {
+                    const texture = new THREE.Texture(img);
+                    texture.needsUpdate = true;
+                    texture.minFilter = THREE.LinearFilter;
+                    texture.magFilter = THREE.LinearFilter;
+                    texture.wrapS = THREE.ClampToEdgeWrapping;
+                    texture.wrapT = THREE.ClampToEdgeWrapping;
+                    texture.flipY = false;
+                    texture.format = THREE.RGBAFormat;
+                    
+                    if (imageTexture && imageTexture.dispose) {
+                        imageTexture.dispose();
+                    }
+                    
+                    imageTexture = texture;
+                    blurMaterial.uniforms.uTexture.value = texture;
+                    blurMaterial.needsUpdate = true;
+                    
+                } catch (error) {
+                    console.error('텍스처 생성 오류:', error);
+                    createFallbackTexture();
+                }
+            };
+            
+            img.onerror = (error) => {
+                console.error('이미지 로드 실패:', error);
+                console.log('기본 체크보드 패턴으로 대체');
+                createFallbackTexture();
+            };
+            
+            img.src = filename;
+        }
+
+        function createRenderTargets() {
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+
+            horizontalTarget = new THREE.WebGLRenderTarget(width, height, {
+                minFilter: THREE.LinearFilter,
+                magFilter: THREE.LinearFilter,
+                format: THREE.RGBAFormat
+            });
+
+            verticalTarget = new THREE.WebGLRenderTarget(width, height, {
+                minFilter: THREE.LinearFilter,
+                magFilter: THREE.LinearFilter,
+                format: THREE.RGBAFormat
+            });
+        }
+
+        function createFallbackTexture() {
+            const size = 512;
+            const canvas = document.createElement('canvas');
+            canvas.width = size;
+            canvas.height = size;
+            const ctx = canvas.getContext('2d');
+            
+            const checkSize = 32;
+            for (let x = 0; x < size; x += checkSize) {
+                for (let y = 0; y < size; y += checkSize) {
+                    const isEven = (Math.floor(x / checkSize) + Math.floor(y / checkSize)) % 2 === 0;
+                    ctx.fillStyle = isEven ? '#4a90e2' : '#7bb3f0';
+                    ctx.fillRect(x, y, checkSize, checkSize);
+                }
+            }
+
+            ctx.fillStyle = 'white';
+            ctx.font = 'bold 24px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('Two-Pass Blur', size/2, size/2 - 10);
+            ctx.font = '16px Arial';
+            ctx.fillText('파일을 업로드하세요', size/2, size/2 + 20);
+
+            imageTexture = new THREE.CanvasTexture(canvas);
+            imageTexture.needsUpdate = true;
+        }
+
+        function createImagePlane() {
+            const geometry = new THREE.PlaneGeometry(2, 2);
+
+            blurMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    uTexture: { value: imageTexture },
+                    uBlurTexture: { value: null },
+                    uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+                    uPass: { value: 0 }, // 0 = horizontal, 1 = vertical, 2 = final composite
+                    uXOffset: { value: 0.0 },
+                    uYOffset: { value: 0.70 },
+                    uBlurStrength: { value: 1 },
+                    uBlurRadius: { value: 100 },
+                    uBezierP1: { value: 1.0 },
+                    uBezierP2: { value: 1.0 }
+                },
+
+                vertexShader: `
+                    precision mediump float;
+                    varying vec2 vUv;
+                    
+                    void main() {
+                        vUv = uv;
+                        gl_Position = vec4(position, 1.0);
+                    }
+                `,
+
+                fragmentShader: `
+                    uniform sampler2D uTexture;
+                    uniform sampler2D uBlurTexture;
+                    uniform vec2 uResolution;
+                    uniform int uPass;
+                    uniform float uYOffset;
+                    uniform float uXOffset;
+                    uniform float uBlurStrength;
+                    uniform float uBlurRadius;
+                    uniform float uBezierP1;
+                    uniform float uBezierP2;
+                    varying vec2 vUv;
+                    
+                    // 1D 가우시안 함수
+                    float gaussian(float x, float sigma) {
+                        return 1.0 / (sqrt(2.0 * 3.141592) * sigma) * exp(-(x * x) / (2.0 * sigma * sigma));
+                    }
+
+                    // 베지어 곡선 계산
+                    float cubicBezier(float t, float p1, float p2) {
+                        float invT = 1.0 - t;
+                        return 3.0 * invT * invT * t * p1 + 3.0 * invT * t * t * p2 + t * t * t;
+                    }
+                    
+                    // 그라데이션 값 계산
+                    float getGradientValue(vec2 uv, float yOffset) {
+                        float t = smoothstep(yOffset, 0.0, uv.y);
+                        return clamp(0.0, 1.0, t);
+                    }
+
+                    // Radius Adaptive 가우시안 블러
+                    vec4 gaussianAdaptiveBlurSeparable(sampler2D tex, vec2 uv, vec2 direction, 
+                            float radius, float strength) {
+                        if (radius < 0.01) {
+                            return texture2D(tex, uv);
+                        }                        
+                        vec4 color = vec4(0.0);
+                        float total = 0.0;                        
+                        float sigma = radius / 3.0;
+                        int kernelSize = int(radius + 1.0);                        
+                        for (int i = -kernelSize; i <= kernelSize; i++) {                       
+                            vec2 offset = direction * float(i) * strength;
+                            float weight = gaussian(float(i), sigma);
+                            color += texture2D(tex, uv + offset) * weight;
+                            total += weight;
+                        }                        
+                        return color / total;
+                    }
+
+                    // Genral 가우시안 블러
+                    vec4 gaussianBlurSeparable(sampler2D tex, vec2 uv, vec2 direction, float radius, float strength) {
+                        vec4 color = vec4(0.0);
+                        float total = 0.0;
+       
+                        // 가우시안 가중치 계산을 위한 sigma
+                        float sigma = radius / 3.0;
+                        int kernelSize = int(radius + 1.0);
+                        for (int i = -kernelSize; i <= kernelSize; i++) {                            
+                            vec2 offset = direction * float(i) * strength;                            
+                            float weight = gaussian(float(i), sigma);                                
+                            color += texture2D(tex, uv + offset) * weight;
+                            total += weight;
+                        }
+                        
+                        return color / total;
+                    }
+
+                    void main() {
+                        vec2 uv = vUv;
+                        vec2 texelSize = vec2(1.0) / uResolution;
+                        float blurBoundary = 0.5 + uXOffset * 0.5;
+
+                        if (uPass == 0) {
+                            // Pass 1: Horizontal blur
+                            float blurIntensity = getGradientValue(uv, uYOffset);
+                            float bezierValue = cubicBezier(blurIntensity, uBezierP1, uBezierP2);
+                            float currentRadius = uBlurRadius * bezierValue;
+                            if (uv.x < blurBoundary) {
+                                gl_FragColor = gaussianAdaptiveBlurSeparable(uTexture, uv, vec2(texelSize.x, 0.0), currentRadius, uBlurStrength);
+                            }
+                            else {
+                                gl_FragColor = gaussianBlurSeparable(uTexture, uv, vec2(texelSize.x, 0.0), currentRadius, uBlurStrength);
+                            }
+                        } else if (uPass == 1) {
+                            // Pass 2: Vertical blur
+                            float blurIntensity = getGradientValue(uv, uYOffset);
+                            float bezierValue = cubicBezier(blurIntensity, uBezierP1, uBezierP2);
+                            float currentRadius = uBlurRadius * bezierValue;             
+                            if (uv.x < blurBoundary) {      
+                                gl_FragColor = gaussianAdaptiveBlurSeparable(uBlurTexture, uv, vec2(0.0, texelSize.y), currentRadius, uBlurStrength);
+                            } else {
+                                gl_FragColor = gaussianBlurSeparable(uBlurTexture, uv, vec2(0.0, texelSize.y), currentRadius, uBlurStrength);
+                            }                  
+                            gl_FragColor = gaussianAdaptiveBlurSeparable(uBlurTexture, uv, 
+                                vec2(0.0, texelSize.y), currentRadius, uBlurStrength);   
+                        } else {
+                            if (uv.x < blurBoundary) {                                
+                                gl_FragColor = texture2D(uBlurTexture, uv);
+
+                            } else {                                  
+                                float blurIntensity = getGradientValue(uv, uYOffset);
+                                float bezierValue = cubicBezier(blurIntensity, uBezierP1, uBezierP2); 
+                                vec4 blurredColor = texture2D(uBlurTexture, uv);        
+                                vec4 originalColor = texture2D(uTexture, uv);                                     
+                                //gl_FragColor = mix(originalColor, blurredColor, bezierValue);                        
+                                gl_FragColor = (1.0 - bezierValue ) * originalColor + blurredColor * bezierValue;                        
+                            }
+                        }                           
+                                    
+                        // 경계선 표시
+                        float borderWidth = 0.002;
+                        if (abs(uv.x - blurBoundary) < borderWidth) {
+                            gl_FragColor = mix(gl_FragColor, vec4(1.0, 1.0, 0.0, 1.0), 0.3);
+                        }
+                    }
+                `,
+
+                side: THREE.DoubleSide
+            });
+
+            plane = new THREE.Mesh(geometry, blurMaterial);
+            scene.add(plane);
+        }
+
+        function setupControls() {
+            const xOffsetSlider = document.getElementById('xOffset');
+            const xOffsetValue = document.getElementById('xOffsetValue');
+            xOffsetSlider.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                blurMaterial.uniforms.uXOffset.value = value;
+                xOffsetValue.textContent = value.toFixed(2);
+            });
+
+            const yOffsetSlider = document.getElementById('yOffset');
+            const yOffsetValue = document.getElementById('yOffsetValue');
+            yOffsetSlider.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                blurMaterial.uniforms.uYOffset.value = value;
+                yOffsetValue.textContent = value.toFixed(2);
+            });
+
+            const blurStrengthSlider = document.getElementById('blurStrength');
+            const blurStrengthValue = document.getElementById('blurStrengthValue');
+            blurStrengthSlider.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                blurMaterial.uniforms.uBlurStrength.value = value;
+                blurStrengthValue.textContent = value.toFixed(1);
+            });
+
+            const blurRadiusSlider = document.getElementById('blurRadius');
+            const blurRadiusValue = document.getElementById('blurRadiusValue');
+            blurRadiusSlider.addEventListener('input', (e) => {
+                const value = parseInt(e.target.value);
+                blurMaterial.uniforms.uBlurRadius.value = value;
+                blurRadiusValue.textContent = value;
+            });
+
+            const bezierP1Slider = document.getElementById('bezierP1');
+            const bezierP1Value = document.getElementById('bezierP1Value');
+            bezierP1Slider.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                blurMaterial.uniforms.uBezierP1.value = value;
+                bezierP1Value.textContent = value.toFixed(2);
+            });
+
+            const bezierP2Slider = document.getElementById('bezierP2');
+            const bezierP2Value = document.getElementById('bezierP2Value');
+            bezierP2Slider.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                blurMaterial.uniforms.uBezierP2.value = value;
+                bezierP2Value.textContent = value.toFixed(2);
+            });
+        }
+
+        function setupFileInput() {
+            const fileInput = document.getElementById('fileInput');
+            const uploadStatus = document.getElementById('uploadStatus');
+            
+            fileInput.addEventListener('change', (event) => {
+                const file = event.target.files[0];
+                
+                if (!file) {
+                    uploadStatus.textContent = '파일을 선택하세요';
+                    uploadStatus.style.color = '#ccc';
+                    return;
+                }
+                
+                uploadStatus.textContent = '파일 처리 중...';
+                uploadStatus.style.color = 'yellow';
+                
+                if (!file.type.startsWith('image/')) {
+                    uploadStatus.textContent = '지원하지 않는 파일 형식입니다';
+                    uploadStatus.style.color = 'red';
+                    return;
+                }
+                
+                const reader = new FileReader();
+                
+                reader.onload = (e) => {
+                    uploadStatus.textContent = '이미지 로딩 중...';
+                    
+                    const img = new Image();
+                    img.crossOrigin = 'anonymous';
+                    
+                    img.onload = () => {
+                        uploadStatus.textContent = `이미지 로드 완료 (${img.width}x${img.height})`;
+                        uploadStatus.style.color = 'lightgreen';
+                        
+                        try {
+                            const texture = new THREE.Texture(img);
+                            texture.needsUpdate = true;
+                            texture.minFilter = THREE.LinearFilter;
+                            texture.magFilter = THREE.LinearFilter;
+                            texture.wrapS = THREE.ClampToEdgeWrapping;
+                            texture.wrapT = THREE.ClampToEdgeWrapping;
+                            texture.flipY = false;
+                            texture.format = THREE.RGBAFormat;
+                            
+                            if (imageTexture && imageTexture.dispose) {
+                                imageTexture.dispose();
+                            }
+                            
+                            imageTexture = texture;
+                            blurMaterial.uniforms.uTexture.value = texture;
+                            blurMaterial.needsUpdate = true;
+                            
+                        } catch (error) {
+                            console.error('텍스처 생성 오류:', error);
+                            uploadStatus.textContent = '텍스처 생성 실패';
+                            uploadStatus.style.color = 'red';
+                        }
+                    };
+                    
+                    img.onerror = (error) => {
+                        console.error('이미지 로드 실패:', error);
+                        uploadStatus.textContent = '이미지 로드 실패';
+                        uploadStatus.style.color = 'red';
+                    };
+                    
+                    img.src = e.target.result;
+                };
+                
+                reader.onerror = (error) => {
+                    console.error('파일 읽기 실패:', error);
+                    uploadStatus.textContent = '파일 읽기 실패';
+                    uploadStatus.style.color = 'red';
+                };
+                
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function onWindowResize() {
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            
+            renderer.setSize(width, height);
+            blurMaterial.uniforms.uResolution.value.set(width, height);
+            
+            // 렌더 타겟 크기 조정
+            horizontalTarget.setSize(width, height);
+            verticalTarget.setSize(width, height);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // Pass 1: Horizontal blur
+            blurMaterial.uniforms.uPass.value = 0;
+            blurMaterial.uniforms.uTexture.value = imageTexture;
+            renderer.setRenderTarget(horizontalTarget);
+            renderer.render(scene, camera);
+            
+            // Pass 2: Vertical blur
+            blurMaterial.uniforms.uPass.value = 1;
+            blurMaterial.uniforms.uBlurTexture.value = horizontalTarget.texture;
+            renderer.setRenderTarget(verticalTarget);
+            renderer.render(scene, camera);
+            
+            // Pass 3: Final composite
+            blurMaterial.uniforms.uPass.value = 2;
+            blurMaterial.uniforms.uBlurTexture.value = verticalTarget.texture;
+            renderer.setRenderTarget(null);
+            renderer.render(scene, camera);
+        }
+
+        init();
+        animate();
+
+        console.log("🚀 Two-Pass 가우시안 블러 앱 시작!");
+    </script>
+</body>
+</html>
